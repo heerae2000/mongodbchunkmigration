@@ -1,0 +1,169 @@
+
+==============================================================================
+CASE clone: write after the recipient has cloned, before it catches up
+==============================================================================
+Expected: writes go to the donor (still the owner) and succeed immediately. The recipient's
+copy is stale until it resumes and pulls the donor's recorded changes (the catch-up phase).
+
+[20:12:53.895] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:12:53.897] Recipient will pause at step 4: finished cloning documents  (failpoint migrateThreadHangAtStep4)
+[20:12:53.898] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:12:55.110] Recipient is paused at step 4
+[20:12:55.110] Writing through mongos while the recipient is paused:
+[20:12:55.120]   insert k=100005 v=1            9 ms
+[20:12:55.129]   update k=50010 set v=1         9 ms
+[20:12:55.139]   delete k=50020                  9 ms
+[20:12:55.140] Where each write is stored right now:
+  k=100005 (inserted):  donor v=1 | recipient missing | mongos v=1
+  k=50010 (updated):  donor v=1 | recipient v=0 | mongos v=1
+  k=50020 (deleted):  donor missing | recipient v=0 | mongos missing
+  PASS  donor has the update
+  PASS  recipient's cloned copy is still the old value
+[20:12:55.186] Recipient released from step 4
+[20:12:55.590] moveRange returned ok=1 after 1125 ms
+  PASS  migration succeeded
+  PASS  inserted doc visible via mongos and stored on recipient (v=1)
+  PASS  updated doc has new value via mongos and on recipient (v=1)
+  PASS  deleted doc gone via mongos and on recipient
+  PASS  recipient stores exactly 50000 docs in the range (+1 insert, -1 delete)
+  PASS  mongos sees the same count (no duplicates, nothing lost)
+
+==============================================================================
+CASE catchup: write while the recipient is in steady state, before the critical section
+==============================================================================
+Expected: writes go to the donor and succeed immediately. The recipient keeps polling the
+donor for changes even though the donor is paused, so it picks them up within moments.
+
+[20:12:57.407] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:12:57.408] Donor will pause at step 4: recipient caught up, about to enter critical section  (failpoint moveChunkHangAtStep4)
+[20:12:57.408] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:12:58.786] Donor is paused at step 4
+[20:12:58.787] Writing through mongos while the donor is paused:
+[20:12:58.810]   insert k=100005 v=2            23 ms
+[20:12:58.837]   update k=50010 set v=2         25 ms
+[20:12:58.862]   delete k=50020                  24 ms
+[20:12:58.862] Immediately after the writes:
+  k=100005 (inserted):  donor v=2 | recipient v=2 | mongos v=2
+  k=50010 (updated):  donor v=2 | recipient v=2 | mongos v=2
+  k=50020 (deleted):  donor missing | recipient missing | mongos missing
+[20:12:58.967] Waiting up to 5 s to see whether the recipient picks them up while the donor is still paused...
+  k=50010 (updated):  donor v=2 | recipient v=2 | mongos v=2
+  PASS  recipient applied the update while the donor was still paused (steady-state catch-up)
+[20:12:59.075] Donor released from step 4
+[20:13:00.288] moveRange returned ok=1 after 2345 ms
+  PASS  migration succeeded
+  PASS  inserted doc visible via mongos and stored on recipient (v=2)
+  PASS  updated doc has new value via mongos and on recipient (v=2)
+  PASS  deleted doc gone via mongos and on recipient
+  PASS  recipient stores exactly 50000 docs in the range (+1 insert, -1 delete)
+  PASS  mongos sees the same count (no duplicates, nothing lost)
+
+==============================================================================
+CASE critsec: write while the donor is inside the critical section
+==============================================================================
+Expected: reads still succeed, but writes wait. A write with a time limit fails without
+being applied; a write without one waits, then lands on the recipient. The critical section
+covers the whole collection on the donor, so writes to the chunk that is NOT moving wait too.
+
+[20:13:03.732] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:13:03.734] Donor will pause at step 5: inside critical section, recipient has committed data  (failpoint moveChunkHangAtStep5)
+[20:13:03.734] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:13:05.938] Donor is paused at step 5
+[20:13:05.941] read   k=50010 (moving chunk), 3 s limit: succeeded in 2 ms
+  PASS  reads of the moving chunk are not blocked in this part of the critical section
+[20:13:08.952] update k=50011 (moving chunk), 3 s limit: still waiting at the 3000 ms limit (MaxTimeMSExpired)
+  PASS  write to the moving chunk waited until its time limit
+[20:13:11.964] update k=5 (chunk NOT moving), 3 s limit: still waiting at the 3000 ms limit (MaxTimeMSExpired)
+  PASS  write to the chunk that is not moving waited too (critical section is collection-wide)
+[20:13:11.964] Starting update k=50010 set v=3 with no time limit, in the background...
+  PASS  after 4 s the background write is still waiting
+  k=50010 (while write is waiting):  donor v=0 | recipient v=0 | mongos v=0
+[20:13:15.988] Donor released from step 5
+[20:13:16.192] moveRange returned ok=1 after 11879 ms
+  PASS  migration succeeded
+[20:13:16.194] background write finished: nModified=1 after 3629 ms
+  PASS  background write succeeded once the critical section ended
+  k=50010 (after):  donor v=0 | recipient v=3 | mongos v=3
+  PASS  the write landed on the recipient (new owner), not the donor
+  k=50011 (timed-out write):  donor v=0 | recipient v=0 | mongos v=0
+  PASS  the timed-out write was not applied anywhere
+  k=5 (timed-out write, other chunk):  donor v=0 | recipient missing | mongos v=0
+  PASS  the timed-out write to the other chunk was not applied
+
+==============================================================================
+CASE commit: reads right after the config server commits, before the donor refreshes
+==============================================================================
+Expected: the config server already lists the recipient as owner, but the donor's critical
+section is in its commit phase, so reads wait as well as writes, for both chunks.
+
+[20:13:18.049] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:13:18.051] Donor will pause after the config commit, before refreshing its metadata (failpoint hangBeforePostMigrationCommitRefresh)
+[20:13:18.051] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:13:19.995] Config server now records the new owner:
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+  PASS  migration has not returned yet (donor still paused)
+[20:13:23.018] read k=50010 (moved chunk), 3 s limit: still waiting at the 3000 ms limit (MaxTimeMSExpired)
+  PASS  read of the moved chunk waited (mongos still routes it to the donor)
+[20:13:26.025] read k=5 (chunk NOT moving), 3 s limit: still waiting at the 3000 ms limit (MaxTimeMSExpired)
+  PASS  read of the chunk that stays on the donor waited too
+[20:13:26.025] Starting read k=50010 with no time limit, in the background...
+  PASS  after 3 s the background read is still waiting
+[20:13:29.036] Donor released
+[20:13:29.238] moveRange returned ok=1 after 10740 ms
+  PASS  migration succeeded
+[20:13:29.238] background read finished: 1 document(s) after 2631 ms
+  PASS  background read returned the document once the critical section ended
+
+==============================================================================
+CASE after: writes right after the commit, while the donor still stores orphans
+==============================================================================
+Expected: new writes go only to the recipient. The donor's old copy is stale but invisible
+through mongos, and is deleted after orphanCleanupDelaySecs.
+
+[20:13:30.981] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:13:30.981] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:13:32.490] moveRange returned ok=1 after 1049 ms
+  PASS  migration succeeded
+  just after commit: docs with k >= 50000  stored on donor=50000  stored on recipient=50000  seen via mongos=50000
+[20:13:32.555] Writing through mongos:
+[20:13:32.560]   insert k=100005 v=4            5 ms
+[20:13:32.566]   update k=50010 set v=4         6 ms
+[20:13:32.572]   delete k=50020                  5 ms
+  k=100005 (inserted):  donor missing | recipient v=4 | mongos v=4
+  k=50010 (updated):  donor v=0 | recipient v=4 | mongos v=4
+  k=50020 (deleted):  donor v=0 | recipient missing | mongos missing
+  PASS  insert stored only on the recipient
+  PASS  donor's orphan copy is stale (v=0) but mongos shows the new value
+  PASS  deleted doc still exists as an orphan on the donor, but not via mongos
+  PASS  inserted doc visible via mongos and stored on recipient (v=4)
+  PASS  updated doc has new value via mongos and on recipient (v=4)
+  PASS  deleted doc gone via mongos and on recipient
+  PASS  recipient stores exactly 50000 docs in the range (+1 insert, -1 delete)
+  PASS  mongos sees the same count (no duplicates, nothing lost)
+
+==============================================================================
+CASE retry: retryable writes made before the migration, retried after it
+==============================================================================
+Expected: the retries are recognized as already done, even though they now go to a different
+shard, because the donor transfers its record of executed writes along with the documents.
+
+[20:13:34.320] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:13:34.324] Donor will pause at step 4: recipient caught up, about to enter critical section  (failpoint moveChunkHangAtStep4)
+[20:13:34.324] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:13:35.363] Donor is paused at step 4
+[20:13:35.371] findAndModify $inc k=50030 (session A, txnNumber N): new value v=1
+[20:13:35.379] insert k=100007 (session B, txnNumber N): n=1
+[20:13:35.381] Donor released from step 4
+[20:13:35.883] moveRange returned ok=1 after 1032 ms
+  PASS  migration succeeded
+[20:13:35.893] Range now owned by shard1. Retrying both commands with the same session and txnNumber:
+[20:13:35.898] retry findAndModify: returned v=1
+[20:13:35.901] retry insert: ok=1 n=1
+  PASS  retried findAndModify returned the original result (v=1), not a second increment
+  PASS  the document was incremented once (v=1)
+  PASS  retried insert reported success
+  PASS  only one copy of the inserted document exists
+  PASS  a new txnNumber does increment again (v=2), so the retry check is real
+
+All checks passed.

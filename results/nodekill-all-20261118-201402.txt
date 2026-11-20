@@ -1,0 +1,420 @@
+
+==============================================================================
+SCENARIO recipient-clone: kill the RECIPIENT primary after it has cloned the documents
+==============================================================================
+Expected: the interrupted attempt aborts. The donor never stopped being the owner, so it
+keeps serving writes. The donor records the abort and marks the recipient's range-deletion
+task ready, so the recipient's partial copy is deleted. mongos may then retry the moveRange
+against shard1's new primary.
+
+[20:14:04.888] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:14:04.950] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:14:06.956] Recipient will pause at step 4: finished cloning documents  (failpoint migrateThreadHangAtStep4)
+[20:14:06.956] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:14:08.375] Recipient is paused at step 4
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId 27bd510b…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: empty
+[20:14:08.453] KILLED shard1-0 (pid 3858) with SIGKILL
+[20:14:19.220] shard1 elected a new primary: shard1-2 (10765 ms after the kill)
+[20:14:24.955] moveRange returned ok=1 after 17371 ms
+[20:14:24.962] Recovery records cleared (7 ms): the migration's outcome is settled on both shards
+
+[20:14:24.966] Interrupted attempt (migrationId 27bd510b…) was decided ABORTED, logged by shard0-0
+  PASS  interrupted attempt was aborted
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+[20:14:24.979] Final owner of the range: shard1 (mongos retried moveRange automatically, and the retry committed); moveRange returned ok
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (ok and owner shard1)
+
+  -- What the shard1 primary logged after the kill --
+  20:14:19.194  id=4798510  Starting migration coordinator step-up recovery
+  20:14:19.195  id=6064504  Starting migration recipient step-up recovery
+  20:14:19.196  id=6064505  Finished migration recipient step-up recovery
+  20:14:24.120  id=4798501  Starting migration recovery
+  20:14:24.133  id=22000    Starting receiving end of chunk migration
+  20:14:24.857  id=5899114  Entered migration recipient critical section
+  20:14:24.879  id=5899108  Exited migration recipient critical section
+  20:14:24.889  id=5004703  clearReceiveChunk
+[20:14:25.958] Restarted shard1-0
+[20:14:25.979] shard1: all 3 members healthy again
+[20:14:28.092] Workload stopped after 1450 writes
+
+==============================================================================
+SCENARIO recipient-clone: what clients saw, and the checker
+==============================================================================
+  writes attempted: 1450   acknowledged: 1450   returned an error: 0
+  slowest write: 3260 ms (ins-moving, started 20:14:19.248)
+  writes completed per second (from 20:14:05.000):
+    48 73 82 |paused| 66 79 67 74 76 76 76 76 80 78 74 |elected| 18 0 0 33 69 |settled| 62 |restart| 88 79 76
+  inserts acknowledged: 967, found: 967, missing: 0, stored twice: 0
+  counter: 483 acknowledged increments, 0 returned an error; stored value n=483
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (483 <= n <= 483)
+
+[20:14:28.196] shard0 (not the owner) still stores 50398 documents from the range
+[20:14:45.505] shard0 (not the owner) still stores 39179 documents from the range
+[20:14:46.513] shard0 (not the owner) still stores 15081 documents from the range
+[20:14:47.519] shard0 (not the owner) still stores 0 documents from the range
+  PASS  shard0 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50483  seen via mongos=50483
+  PASS  mongos sees each document in the range exactly once
+
+==============================================================================
+SCENARIO donor-clone: kill the DONOR primary after the recipient has cloned the documents
+==============================================================================
+Expected: the interrupted attempt aborts. Writes stall while shard0 elects a new
+primary (about 10 s), then resume. The new donor primary finds the unfinished migration in
+config.migrationCoordinators with no decision, asks the config server who owns the range,
+learns it is still the owner, and records the decision as aborted. mongos may then retry
+the moveRange against the new donor primary.
+
+[20:14:49.301] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:14:49.368] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:14:51.373] Recipient will pause at step 4: finished cloning documents  (failpoint migrateThreadHangAtStep4)
+[20:14:51.374] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:14:52.585] Recipient is paused at step 4
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId c60f7808…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: empty
+[20:14:52.710] KILLED shard0-0 (pid 3616) with SIGKILL
+[20:14:52.713] Recipient released from step 4
+[20:15:02.809] shard0 elected a new primary: shard0-1 (10095 ms after the kill)
+[20:15:07.034] moveRange returned ok=1 after 15069 ms
+[20:15:07.043] Recovery records cleared (8 ms): the migration's outcome is settled on both shards
+
+[20:15:07.051] Interrupted attempt (migrationId c60f7808…) was decided ABORTED, logged by shard0-1 (the newly elected donor primary)
+  PASS  interrupted attempt was aborted
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+[20:15:07.063] Final owner of the range: shard1 (mongos retried moveRange automatically, and the retry committed); moveRange returned ok
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (ok and owner shard1)
+
+  -- What the shard0 primary logged after the kill --
+  20:15:02.772  id=4798510  Starting migration coordinator step-up recovery
+  20:15:02.773  id=6064504  Starting migration recipient step-up recovery
+  20:15:02.774  id=6064505  Finished migration recipient step-up recovery
+  20:15:02.782  id=4798501  Starting migration recovery
+  20:15:02.783  id=4798502  Recovering migration
+  20:15:02.795  id=22016    Starting chunk migration donation
+  20:15:02.814  id=23891    MigrationCoordinator setting migration decision  [decision=aborted]
+  20:15:02.814  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=aborted]
+  20:15:06.880  id=22017    Migration successfully entered critical section
+  20:15:06.911  id=22018    Migration succeeded and updated collection placement version
+  20:15:06.911  id=23891    MigrationCoordinator setting migration decision  [decision=committed]
+  20:15:06.911  id=6107802  Finished critical section
+  20:15:06.912  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=committed]
+  20:15:06.944  id=7627801  Migration finished
+  20:15:06.946  id=6386803  Unregistering donate chunk
+[20:15:08.707] Restarted shard0-0
+[20:15:08.725] shard0: all 3 members healthy again
+[20:15:10.835] Workload stopped after 796 writes
+
+==============================================================================
+SCENARIO donor-clone: what clients saw, and the checker
+==============================================================================
+  writes attempted: 796   acknowledged: 796   returned an error: 0
+  slowest write: 10209 ms (ins-moving, started 20:14:52.648)
+  writes completed per second (from 20:14:49.000):
+    15 71 86 |paused| 46 0 0 0 0 0 0 0 0 0 |elected| 11 71 71 75 63 |settled| 84 |restart| 77 73 53
+  inserts acknowledged: 531, found: 531, missing: 0, stored twice: 0
+  counter: 265 acknowledged increments, 0 returned an error; stored value n=265
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (265 <= n <= 265)
+
+[20:15:10.914] shard0 (not the owner) still stores 50167 documents from the range
+[20:15:27.203] shard0 (not the owner) still stores 48349 documents from the range
+[20:15:28.216] shard0 (not the owner) still stores 36782 documents from the range
+[20:15:29.228] shard0 (not the owner) still stores 13876 documents from the range
+[20:15:30.233] shard0 (not the owner) still stores 0 documents from the range
+  PASS  shard0 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50265  seen via mongos=50265
+  PASS  mongos sees each document in the range exactly once
+
+==============================================================================
+SCENARIO donor-critsec: kill the DONOR primary inside the critical section, before the commit
+==============================================================================
+Expected: the interrupted attempt aborts, even though the recipient already holds a complete copy and
+its own critical section. The commit never reached the config server, so the config server
+still lists the donor as owner, and recovery decides from that. mongos may then retry the
+moveRange against the new donor primary.
+
+[20:15:32.042] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:15:32.117] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:15:34.127] Donor will pause at step 5: inside critical section, recipient has committed data  (failpoint moveChunkHangAtStep5)
+[20:15:34.128] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:15:35.789] Donor is paused at step 5
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId 4f8d5851…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: 1 document(s): recipient critical section is held
+[20:15:35.867] KILLED shard0-1 (pid 3695) with SIGKILL
+[20:15:45.560] shard0 elected a new primary: shard0-2 (9692 ms after the kill)
+[20:15:49.892] moveRange returned ok=1 after 15140 ms
+[20:15:49.901] Recovery records cleared (9 ms): the migration's outcome is settled on both shards
+
+[20:15:49.908] Interrupted attempt (migrationId 4f8d5851…) was decided ABORTED, logged by shard0-2 (the newly elected donor primary)
+  PASS  interrupted attempt was aborted
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+[20:15:49.922] Final owner of the range: shard1 (mongos retried moveRange automatically, and the retry committed); moveRange returned ok
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (ok and owner shard1)
+
+  -- What the shard0 primary logged after the kill --
+  20:15:45.535  id=4798510  Starting migration coordinator step-up recovery
+  20:15:45.536  id=6064504  Starting migration recipient step-up recovery
+  20:15:45.536  id=6064505  Finished migration recipient step-up recovery
+  20:15:45.541  id=4798501  Starting migration recovery
+  20:15:45.541  id=4798502  Recovering migration
+  20:15:45.554  id=22016    Starting chunk migration donation
+  20:15:45.567  id=23891    MigrationCoordinator setting migration decision  [decision=aborted]
+  20:15:45.567  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=aborted]
+  20:15:49.700  id=22017    Migration successfully entered critical section
+  20:15:49.727  id=22018    Migration succeeded and updated collection placement version
+  20:15:49.727  id=23891    MigrationCoordinator setting migration decision  [decision=committed]
+  20:15:49.727  id=6107802  Finished critical section
+  20:15:49.728  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=committed]
+  20:15:49.769  id=7627801  Migration finished
+  20:15:49.774  id=6386803  Unregistering donate chunk
+[20:15:52.445] Restarted shard0-1
+[20:15:52.456] shard0: all 3 members healthy again
+[20:15:54.563] Workload stopped after 895 writes
+
+==============================================================================
+SCENARIO donor-critsec: what clients saw, and the checker
+==============================================================================
+  writes attempted: 895   acknowledged: 895   returned an error: 0
+  slowest write: 10216 ms (inc, started 20:15:35.416)
+  writes completed per second (from 20:15:32.000):
+    31 74 84 |paused| 28 0 0 0 0 0 0 0 0 0 |elected| 23 70 72 79 |settled| 70 86 86 |restart| 81 76 35
+  inserts acknowledged: 597, found: 597, missing: 0, stored twice: 0
+  counter: 298 acknowledged increments, 0 returned an error; stored value n=298
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (298 <= n <= 298)
+
+[20:15:54.641] shard0 (not the owner) still stores 50169 documents from the range
+[20:16:09.908] shard0 (not the owner) still stores 48436 documents from the range
+[20:16:10.922] shard0 (not the owner) still stores 25004 documents from the range
+[20:16:11.928] shard0 (not the owner) still stores 2626 documents from the range
+[20:16:12.936] shard0 (not the owner) still stores 0 documents from the range
+  PASS  shard0 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50298  seen via mongos=50298
+  PASS  mongos sees each document in the range exactly once
+
+==============================================================================
+SCENARIO donor-commit: kill the DONOR primary after the config server commit, before the donor records it
+==============================================================================
+Expected: the migration COMMITS. The donor died before writing the decision into
+config.migrationCoordinators, but the config server already lists the recipient as owner.
+The new donor primary asks the config server, sees it no longer owns the range, records the
+decision as committed, and later deletes its orphans.
+
+[20:16:15.095] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:16:15.141] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:16:17.143] Donor will pause right after the config server commit (failpoint hangBeforePostMigrationCommitRefresh)
+[20:16:17.143] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:16:19.186] Config server has committed the new owner; donor is paused before recording the decision
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId 52572800…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: empty
+[20:16:19.262] KILLED shard0-2 (pid 3779) with SIGKILL
+[20:16:28.829] shard0 elected a new primary: shard0-1 (9566 ms after the kill)
+[20:16:28.830] moveRange returned ok=1 after 1608 ms
+[20:16:28.835] Recovery records cleared (5 ms): the migration's outcome is settled on both shards
+
+[20:16:28.844] Interrupted attempt (migrationId 52572800…) was decided COMMITTED, logged by shard0-1 (the newly elected donor primary)
+  PASS  interrupted attempt was committed
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+[20:16:28.854] Final owner of the range: shard1; moveRange returned ok
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (ok and owner shard1)
+
+  -- What the shard0 primary logged after the kill --
+  20:16:28.653  id=4798510  Starting migration coordinator step-up recovery
+  20:16:28.653  id=6064504  Starting migration recipient step-up recovery
+  20:16:28.654  id=6064505  Finished migration recipient step-up recovery
+  20:16:28.659  id=4798501  Starting migration recovery
+  20:16:28.660  id=4798502  Recovering migration
+  20:16:28.688  id=23891    MigrationCoordinator setting migration decision  [decision=committed]
+  20:16:28.688  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=committed]
+[20:16:30.402] Restarted shard0-2
+[20:16:30.414] shard0: all 3 members healthy again
+[20:16:32.520] Workload stopped after 518 writes
+
+==============================================================================
+SCENARIO donor-commit: what clients saw, and the checker
+==============================================================================
+  writes attempted: 518   acknowledged: 518   returned an error: 0
+  slowest write: 10268 ms (ins-other, started 20:16:18.458)
+  writes completed per second (from 20:16:15.000):
+    32 77 86 24 |paused| 0 0 0 0 0 0 0 0 0 |elected| 22 86 |restart| 82 76 33
+  inserts acknowledged: 345, found: 345, missing: 0, stored twice: 0
+  counter: 173 acknowledged increments, 0 returned an error; stored value n=173
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (173 <= n <= 173)
+
+[20:16:32.597] shard0 (not the owner) still stores 50073 documents from the range
+[20:16:48.873] shard0 (not the owner) still stores 48046 documents from the range
+[20:16:49.883] shard0 (not the owner) still stores 27986 documents from the range
+[20:16:50.890] shard0 (not the owner) still stores 7269 documents from the range
+[20:16:51.909] shard0 (not the owner) still stores 0 documents from the range
+  PASS  shard0 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50172  seen via mongos=50172
+  PASS  mongos sees each document in the range exactly once
+
+==============================================================================
+SCENARIO config-commit: kill the CONFIG SERVER just as the donor sends the commit; back after 8 s
+==============================================================================
+Expected: the donor's commit request cannot reach a config server, so the donor waits for
+one to come back, still inside its critical section. Writes to the whole collection on the
+donor wait the entire time. When the config server returns, the commit goes through.
+
+[20:16:53.672] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:16:53.737] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:16:55.741] Donor will pause at step 5: inside critical section, recipient has committed data  (failpoint moveChunkHangAtStep5)
+[20:16:55.741] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:16:58.063] Donor is paused at step 5
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId 588dea56…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: 1 document(s): recipient critical section is held
+[20:16:58.148] KILLED config-0 (pid 3520) with SIGKILL
+[20:16:58.151] Donor released from step 5
+[20:16:58.151] Config server has no other member; it stays down for 8 s, then is restarted
+[20:17:06.696] Restarted config-0
+[20:17:07.225] config: all 1 members healthy again
+[20:17:17.376] moveRange returned ok=1 after 21032 ms
+[20:17:17.380] Recovery records cleared (4 ms): the migration's outcome is settled on both shards
+
+[20:17:17.390] Interrupted attempt (migrationId 588dea56…) was decided COMMITTED, logged by shard0-1
+  PASS  interrupted attempt was committed
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+[20:17:17.400] Final owner of the range: shard1; moveRange returned ok
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (ok and owner shard1)
+
+  -- What the donor primary logged after the kill --
+  20:17:07.206  id=22018    Migration succeeded and updated collection placement version
+  20:17:07.207  id=23891    MigrationCoordinator setting migration decision  [decision=committed]
+  20:17:07.207  id=6107802  Finished critical section
+  20:17:07.207  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=committed]
+  20:17:07.259  id=7627801  Migration finished
+  20:17:07.262  id=6386803  Unregistering donate chunk
+  20:17:07.266  id=22016    Starting chunk migration donation
+  20:17:17.273  id=23777    Error while doing moveChunk  [error=ExceededTimeLimit: Failed to delete orphaned test.users range [{ k: 50000 }, { k: MaxKey }) :: caused by]
+  20:17:17.273  id=6386803  Unregistering donate chunk
+[20:17:19.511] Workload stopped after 1141 writes
+
+==============================================================================
+SCENARIO config-commit: what clients saw, and the checker
+==============================================================================
+  writes attempted: 1141   acknowledged: 1141   returned an error: 0
+  slowest write: 10249 ms (ins-other, started 20:16:56.980)
+  writes completed per second (from 20:16:54.000):
+    56 71 74 0 |paused| 0 0 0 0 0 0 0 0 |restart| 0 61 77 76 77 76 77 76 77 77 78 |settled| 78 76 34
+  inserts acknowledged: 761, found: 761, missing: 0, stored twice: 0
+  counter: 380 acknowledged increments, 0 returned an error; stored value n=380
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (380 <= n <= 380)
+
+[20:17:19.592] shard0 (not the owner) still stores 50067 documents from the range
+[20:17:27.720] shard0 (not the owner) still stores 41082 documents from the range
+[20:17:28.728] shard0 (not the owner) still stores 18143 documents from the range
+[20:17:29.734] shard0 (not the owner) still stores 0 documents from the range
+  PASS  shard0 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50380  seen via mongos=50380
+  PASS  mongos sees each document in the range exactly once
+
+==============================================================================
+SCENARIO config-commit-long: kill the CONFIG SERVER just as the donor sends the commit; back after 75 s
+==============================================================================
+Expected: the donor gives up waiting for an answer, leaves the critical section without
+knowing the outcome, and then keeps asking the config server who owns the range: the same
+recovery path as after a donor crash. The commit never reached the config server, so the
+migration aborts.
+
+[20:17:31.507] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+[20:17:31.558] Workload started: continuous majority-acknowledged writes to both chunks through mongos
+[20:17:33.562] Donor will pause at step 5: inside critical section, recipient has committed data  (failpoint moveChunkHangAtStep5)
+[20:17:33.562] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:17:35.330] Donor is paused at step 5
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  Durable recovery records just before the kill:
+    donor config.migrationCoordinators: {migrationId 7f65f857…, range [50000, MaxKey), decision: (none yet)}
+    recipient config.migrationRecipients: 1 document(s): recipient critical section is held
+[20:17:35.404] KILLED config-0 (pid 8907) with SIGKILL
+[20:17:35.407] Donor released from step 5
+[20:17:35.407] Config server has no other member; it stays down for 75 s, then is restarted
+[20:18:50.936] Restarted config-0
+[20:18:51.450] config: all 1 members healthy again
+[20:18:51.453] moveRange returned ok=0 after 16260 ms:  MongoServerError: Could not find host matching read preference { mode: "primary" } for set config
+[20:18:51.458] Recovery records cleared (5 ms): the migration's outcome is settled on both shards
+
+[20:18:51.473] Interrupted attempt (migrationId 7f65f857…) was decided ABORTED, logged by shard0-1
+  PASS  interrupted attempt was aborted
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+[20:18:51.493] Final owner of the range: shard0; moveRange returned an error: MongoServerError: Could not find host matching read preference { mode: "primary" } for set config
+  PASS  range has exactly one owner
+  PASS  moveRange's reply matches the outcome (error and owner shard0)
+
+  -- What the donor primary logged after the kill --
+  20:17:50.461  id=6107802  Finished critical section
+  20:17:50.462  id=4798501  Starting migration recovery
+  20:17:50.463  id=4798502  Recovering migration
+  20:18:05.464  id=4798501  Starting migration recovery
+  20:18:05.465  id=4798502  Recovering migration
+  20:18:05.466  id=23777    Error while doing moveChunk  [error=FailedToSatisfyReadPreference: Could not find host matching read preference { mode: "primary" } for set ]
+  20:18:05.466  id=6386803  Unregistering donate chunk
+  20:18:20.466  id=4798501  Starting migration recovery
+  20:18:20.466  id=4798502  Recovering migration
+  20:18:35.468  id=4798501  Starting migration recovery
+  20:18:35.469  id=4798502  Recovering migration
+  20:18:50.470  id=4798501  Starting migration recovery
+  20:18:50.470  id=4798502  Recovering migration
+  20:18:51.061  id=23891    MigrationCoordinator setting migration decision  [decision=aborted]
+  20:18:51.061  id=23893    MigrationCoordinator delivering decision to self and to recipient  [decision=aborted]
+[20:18:53.617] Workload stopped after 399 writes
+
+==============================================================================
+SCENARIO config-commit-long: what clients saw, and the checker
+==============================================================================
+  writes attempted: 399   acknowledged: 397   returned an error: 2
+  errors: Write results unavailable from failing to target a host in the shard shard0 :: caused by :: Could no x1, FailedToSatisfyReadPreference x1
+  slowest write: 60649 ms (inc, started 20:17:34.824)
+  writes completed per second (from 20:17:31.000):
+    3 78 84 64 |paused| 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 |restart| 0 |settled| 58 72 38
+  inserts acknowledged: 265, found: 265, missing: 0, stored twice: 0
+  inserts that returned an error: 1 (outcome unknown to the client; 0 were in fact applied)
+  counter: 132 acknowledged increments, 1 returned an error; stored value n=132
+  PASS  every acknowledged insert is present
+  PASS  no insert was stored twice
+  PASS  counter includes every acknowledged increment and none twice (132 <= n <= 133)
+
+[20:18:53.677] shard1 (not the owner) still stores 0 documents from the range
+  PASS  shard1 (not the owner) deleted its copy of the range
+  final: docs with k >= 50000  stored on donor=50132  stored on recipient=0  seen via mongos=50132
+  PASS  mongos sees each document in the range exactly once
+[20:18:53.712] Range is still on the donor; migrating it again to show the cluster is healthy:
+  PASS  a new migration of the same range succeeds
+
+All checks passed.

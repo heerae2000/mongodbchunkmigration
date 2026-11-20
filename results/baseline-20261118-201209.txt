@@ -1,0 +1,104 @@
+
+==============================================================================
+1. Starting state
+==============================================================================
+[20:12:12.658] Loaded 100000 documents into test.users, split at k=50000, all on shard0
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard0
+  before: docs with k >= 50000  stored on donor=50000  stored on recipient=0  seen via mongos=50000
+
+==============================================================================
+2. Move the chunk
+==============================================================================
+[20:12:12.703] Starting moveRange: test.users [k: 50000, MaxKey) from shard0 to shard1
+[20:12:14.519] moveRange returned ok=1 after 1364 ms
+  PASS  moveRange succeeded
+
+==============================================================================
+3. Ownership and storage right after the commit
+==============================================================================
+  chunk [MinKey, 50000) on shard0
+  chunk [50000, MaxKey) on shard1
+  after: docs with k >= 50000  stored on donor=50000  stored on recipient=50000  seen via mongos=50000
+  PASS  config server now says recipient owns the range
+  PASS  recipient stores every document in the range
+  PASS  donor still physically holds its old copy (orphans)
+  PASS  queries through mongos see each document once
+
+==============================================================================
+4. Phase timings recorded on the config server (config.changelog)
+==============================================================================
+
+  Donor (moveChunk.from)
+    step 1       0 ms   check request, register migration
+    step 2       2 ms   set up migration source manager
+    step 3     210 ms   start cloner, tell recipient to begin
+    step 4     625 ms   clone + catch-up (waiting for recipient)
+    step 5     298 ms   critical section: final catch-up, recipient commits data
+    step 6     192 ms   commit on config server, leave critical section
+    total   1327 ms
+
+  Recipient (moveChunk.to)
+    step 1       4 ms   wait for any earlier deletion of this range
+    step 2      66 ms   copy indexes
+    step 3       8 ms   record range-deletion task (cleanup if migration fails)
+    step 4     515 ms   clone documents
+    step 5       2 ms   first catch-up of writes made during the clone
+    step 6      41 ms   steady state: keep catching up until donor commits
+    step 7     183 ms   final catch-up after donor's commit request
+    step 8     234 ms   own critical section, wait for decision, finish
+    total   1053 ms
+
+  Documents transferred (moveChunk.commit): cloned=50000  catch-up=0  steady=0  bytes=12300000
+
+==============================================================================
+5. What each shard logged
+==============================================================================
+
+  -- Donor (shard0) --
+  20:12:13.153  id=22016    MIGRATE   Starting chunk migration donation
+  20:12:13.993  id=21993    SHARDING  moveChunk data transfer progress
+  20:12:13.998  id=22017    MIGRATE   Migration successfully entered critical section
+  20:12:14.321  id=22018    MIGRATE   Migration succeeded and updated collection placement version
+  20:12:14.321  id=6107801  MIGRATE   Exiting commit critical section
+  20:12:14.321  id=6107802  MIGRATE   Finished critical section
+  20:12:14.323  id=3463204  SHARDING  Persisted collection entry and chunk metadata
+  20:12:14.324  id=23893    MIGRATE   MigrationCoordinator delivering decision to self and to recipient  [decision=committed]
+  20:12:14.484  id=7627801  SHARDING  Migration finished
+  20:12:14.497  id=6386803  MIGRATE   Unregistering donate chunk
+
+  -- Recipient (shard1) --
+  20:12:13.363  id=3463204  SHARDING  Persisted collection entry and chunk metadata
+  20:12:13.366  id=22000    MIGRATE   Starting receiving end of chunk migration
+  20:12:13.448  id=6718405  SHARDING  Chunk migration data fetch start
+  20:12:13.563  id=6718416  SHARDING  Chunk migration initial clone fetch end
+  20:12:13.565  id=6718404  SHARDING  Chunk migration initial clone complete
+  20:12:13.565  id=6718401  SHARDING  Shutting down and joining inserter threads for migration {migrationId}
+  20:12:13.961  id=6718408  MIGRATE   Incrementing cloned count by  
+  20:12:13.961  id=6718415  SHARDING  Inserter threads for migration {migrationId} joined
+  20:12:13.964  id=22004    MIGRATE   Waiting for replication to catch up before entering critical section
+  20:12:13.992  id=22005    MIGRATE   Chunk data replicated successfully.
+  20:12:14.006  id=22008    MIGRATE   Migration commit succeeded flushing to secondaries
+  20:12:14.189  id=5087100  SHARDING  Recipient finished draining oplog entries for retryable writes and transactions from donor again after receiving _recvChunkCommit
+  20:12:14.290  id=5899114  MIGRATE   Entered migration recipient critical section
+  20:12:14.321  id=3463204  SHARDING  Persisted collection entry and chunk metadata
+  20:12:14.347  id=5899108  MIGRATE   Exited migration recipient critical section
+  20:12:14.428  id=5004703  MIGRATE   clearReceiveChunk
+
+==============================================================================
+6. Orphan cleanup (donor deletes its copy after orphanCleanupDelaySecs=20s)
+==============================================================================
+[20:12:14.622] donor still stores 50000 documents from the moved range
+[20:12:34.992] donor still stores 39171 documents from the moved range
+[20:12:36.015] donor still stores 18153 documents from the moved range
+[20:12:37.028] donor still stores 0 documents from the moved range
+  final: docs with k >= 50000  stored on donor=0  stored on recipient=50000  seen via mongos=50000
+  PASS  donor's orphans were deleted
+  PASS  mongos count unchanged throughout
+
+  -- Donor range deleter --
+  20:12:34.463  id=6777800  RDELETER  Starting batch deletion
+  20:12:34.463  id=6180601  RDELETER  Begin removal of range
+  20:12:36.783  id=23769    RDELETER  Deleted documents in pass
+
+All checks passed.
