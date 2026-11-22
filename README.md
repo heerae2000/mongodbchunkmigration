@@ -194,7 +194,7 @@ returned. Then it decided "aborted." Either way, **writes to the whole collectio
 on the donor waited for the config server**, and in the long outage that was a
 full minute.
 
-## What the runs show (for the writeup)
+## What the runs show
 
 - **Writes are never refused during clone and catch-up.** They go to the donor,
   which records them, and the recipient pulls them later. In steady state the
