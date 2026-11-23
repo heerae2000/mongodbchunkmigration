@@ -40,8 +40,8 @@ cd migration-demo
 ```
 
 Each test prints `PASS`/`FAIL` lines and ends with `All checks passed.` The
-output is also saved under `results/`. Example output from a real run is in
-`sample-output/`.
+output is also saved under `results/`, which also has example output from
+real runs (`results/baseline.txt`, `results/midwrite.txt`, `results/nodekill.txt`).
 
 ## The cluster
 
@@ -133,7 +133,7 @@ Every scenario follows the same steps:
    own the range deletes its copy; and, if the range stayed on the donor, a new
    migration succeeds.
 
-Results from a full run (`sample-output/nodekill-all.txt`):
+Results from a full run (`results/nodekill.txt`):
 
 | Scenario | What is killed, when | Interrupted attempt | Final owner | Longest write stall | Writes lost or doubled |
 |---|---|---|---|---|---|
